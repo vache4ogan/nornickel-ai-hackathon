@@ -6,8 +6,6 @@ from pyvis.network import Network
 import streamlit.components.v1 as components
 import difflib
 import re
-
-# Используем официальную библиотеку Groq
 from groq import Groq
 
 st.set_page_config(layout="wide", page_title="Knowledge Graph RAG")
@@ -30,7 +28,6 @@ COLOR_MAP = {
 }
 DEFAULT_COLOR = "#95a5a6"
 
-# Жесткий фильтр стоп-слов для русского языка в контексте металлургии
 STOP_WORDS = {
     "какие", "какой", "как", "что", "где", "для", "есть", "это", "методы", 
     "метод", "процесс", "оборудование", "покажи", "расскажи", "найти", 
@@ -49,18 +46,19 @@ def load_graph():
             try:
                 chunk = json.loads(line)
                 
-                # Добавляем узлы
+                # Достаем источник из чанка
+                doc_source = chunk.get("source_document", "База знаний R&D")
+                
                 for ent in chunk.get("entities", []):
                     G.add_node(ent["id"], type=ent.get("type", "Unknown"))
                     
-                # Добавляем связи
                 for rel in chunk.get("relations", []):
-                    # Используем ключи 'source' и 'target'
                     G.add_edge(
                         rel["source"], 
                         rel["target"], 
                         label=rel["type"],
-                        properties=rel.get("properties", {})
+                        properties=rel.get("properties", {}),
+                        doc=doc_source  # Сохраняем источник в ребро
                     )
             except json.JSONDecodeError:
                 pass
@@ -68,10 +66,12 @@ def load_graph():
 
 def ask_groq_llm(context_text: str, question: str) -> str:
     system_prompt = (
-        "Ты — AI-ассистент в горно-металлургической отрасли. "
-        "Твоя задача — отвечать на вопросы пользователя на русском языке, используя ТОЛЬКО предоставленный контекст из Графа Знаний. "
-        "Не придумывай информацию. Если в контексте нет ответа, честно скажи: 'В моем графе знаний нет информации об этом'. "
-        "Отвечай четко, структурированно, ссылаясь на связи между сущностями."
+        "Ты — Senior R&D Аналитик в горно-металлургической компании. Твоя задача — давать развернутые, связные и профессиональные ответы на основе предоставленного графа знаний.\n"
+        "ПРАВИЛА:\n"
+        "1. Синтезируй информацию! Пиши красивым, читаемым текстом (абзацами), объединяй похожие факты. Не делай слепые списки из сырых узлов.\n"
+        "2. Фильтруй мусор: игнорируй непонятные аббревиатуры, обрывки слов (например, 'Co', 'apada') или нерелевантные узлы, если они не несут смысла.\n"
+        "3. ЦИТИРОВАНИЕ ОБЯЗАТЕЛЬНО: вставляй [Источник: Название_файла] прямо в текст предложений, подтверждая свои выводы.\n"
+        "4. Если пользователь пишет не вопрос, а просто термин (например, 'медная руда'), сделай связную аналитическую сводку по этому термину (где применяется, какими методами обрабатывается)."
     )
     
     user_prompt = f"Контекст из Графа Знаний:\n{context_text}\n\nВопрос пользователя: {question}"
@@ -91,29 +91,21 @@ def ask_groq_llm(context_text: str, question: str) -> str:
         return f"⚠️ LLM недоступна из-за ошибки API: {e}. Вот найденный контекст из графа:"
 
 def extract_subgraph(G: nx.DiGraph, query: str, hops: int = 1):
-    # Разделяем вопрос на слова, игнорируем пунктуацию
     words = re.findall(r'\b\w+\b', query.lower())
-    
-    # 3. Умный фильтр: удаляем стоп-слова и слова короче 3 символов
     meaningful_words = [w for w in words if len(w) > 2 and w not in STOP_WORDS]
     
     found_nodes = set()
     all_graph_nodes = list(G.nodes())
     
-    # 4. Fuzzy Matching (cutoff=0.6) только для оставшихся смысловых слов
     for word in meaningful_words:
         matches = difflib.get_close_matches(word, [n.lower() for n in all_graph_nodes], n=5, cutoff=0.6)
-        
-        # Если слово совпало, находим оригинальные узлы (с правильным регистром)
         for match in matches:
             for node in all_graph_nodes:
                 if node.lower() == match:
                     found_nodes.add(node)
                     
-    # Также проверяем точные совпадения подстроки для надежности
     for node in all_graph_nodes:
         if len(node) > 2 and node.lower() in query.lower():
-            # Дополнительная проверка, чтобы не находить предлоги внутри слов
             if bool(re.search(r'\b' + re.escape(node.lower()) + r'\b', query.lower())):
                 found_nodes.add(node)
             
@@ -121,7 +113,6 @@ def extract_subgraph(G: nx.DiGraph, query: str, hops: int = 1):
     if not found_nodes_list:
         return None, []
         
-    # Поиск подграфа (ego-graph)
     subgraph_nodes = set(found_nodes_list)
     for _ in range(hops):
         current_layer = list(subgraph_nodes)
@@ -148,7 +139,10 @@ def render_pyvis_graph(subgraph: nx.DiGraph):
         
     for u, v, data in subgraph.edges(data=True):
         label = data.get("label", "")
-        net.add_edge(u, v, title=label, label=label, color="#7f8c8d")
+        # Добавляем инфу об источнике в тултип ребра
+        doc = data.get("doc", "")
+        edge_title = f"{label} (Источник: {doc})" if doc else label
+        net.add_edge(u, v, title=edge_title, label=label, color="#7f8c8d")
         
     path = '/tmp'
     os.makedirs(path, exist_ok=True)
@@ -176,7 +170,6 @@ st.sidebar.markdown("""
 Material, Process, Equipment, Property, Experiment, Publication, Expert, Facility.
 """)
 
-# Поле ввода вопроса (обычный text_input, не chat)
 prompt = st.text_input("Ваш вопрос:", placeholder="Например: Какие методы подходят для медной руды?")
 
 if prompt:
@@ -189,27 +182,40 @@ if prompt:
         else:
             st.info(f"Распознаны сущности (Smart Match): {', '.join(found_entities)}")
             
-            # Формируем текстовый контекст из подграфа (Ограничение до 50 связей)
+            # Формируем контекст с ИСТОЧНИКАМИ
             context_lines = []
+            unique_sources = set()
+            
             for idx, (u, v, data) in enumerate(subgraph.edges(data=True)):
-                if idx >= 50: # Лимит топ-50
+                if idx >= 50:
                     break
                 rel = data.get("label", "связан с")
-                context_lines.append(f"[{u}] -> [{rel}] -> [{v}]")
+                doc = data.get("doc", "База знаний R&D")
+                
+                if doc != "unknown":
+                    unique_sources.add(doc)
+                    
+                context_lines.append(f"Факт: [{u}] -> [{rel}] -> [{v}] (Источник: {doc})")
+                
             context_text = "\n".join(context_lines)
             
-            # Запрос к LLM Groq SDK
+            # Запрос к LLM
             response = ask_groq_llm(context_text, prompt)
             
-            # Если ответ пустой (на всякий случай)
             if not response:
                 response = "⚠️ Получен пустой ответ от LLM. Вот найденный контекст из графа:"
                 
-            # 1. Выводим текст крупно
+            # 1. Текстовый ответ с цитатами
             st.markdown("### Ответ Ассистента")
             st.markdown(response)
             
-            # 2. Выводим граф как пруф под текстом
+            # 2. Вывод списка уникальных источников (Expander)
+            if unique_sources:
+                with st.expander("📚 Посмотреть список использованных источников"):
+                    for src in sorted(unique_sources):
+                        st.markdown(f"- {src}")
+            
+            # 3. Граф
             st.markdown("---")
             st.markdown("#### Подтверждающий граф (найденный контекст)")
             render_pyvis_graph(subgraph)
