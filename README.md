@@ -62,6 +62,7 @@ pip install streamlit pyvis networkx groq pydantic tqdm requests tenacity
 ```
 
 **2. Запуск пайплайна очистки (Entity Resolution)**
+Нужно в одну папку с проектом залить все сырые данные !
 Этот шаг нормализует сырые триплеты, применяет строгую онтологию и убирает мусор.
 ```bash
 python src/entity_resolution/clean_triplets.py
